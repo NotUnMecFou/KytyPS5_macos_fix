@@ -47,7 +47,7 @@ static RenderContext* g_renderer = nullptr;
 
 namespace Gen5Driver {
 
-static constexpr uint64_t DriverDmemBase = 0x0fe0000000ull;
+static constexpr uint64_t DriverDmemPreferredBase = 0x0fe0000000ull;
 static constexpr uint32_t DriverDmemSize = 0x200000;
 static constexpr uint32_t AgcDmemOffset  = 0x40000;
 
@@ -4166,14 +4166,15 @@ int Initialize() {
 	if (result != OK) {
 		return result;
 	}
-	void* address = reinterpret_cast<void*>(DriverDmemBase);
+	void* address = reinterpret_cast<void*>(DriverDmemPreferredBase);
 	result = LibKernel::Memory::KernelMapNamedDirectMemory(
 	    &address, DriverDmemSize, 0x33, 0, physical_offset, DriverDmemSize, "SceAgcDriver");
 	if (result != OK) {
 		EXIT_IF(LibKernel::Memory::KernelCheckedReleaseDirectMemory(physical_offset, DriverDmemSize) != OK);
 		return result;
 	}
-	EXIT_IF(reinterpret_cast<uint64_t>(address) != DriverDmemBase);
+	const auto mapped_base = reinterpret_cast<uint64_t>(address);
+	EXIT_IF(mapped_base == 0 || (mapped_base & (DriverDmemSize - 1u)) != 0);
 	std::memset(address, 0, DriverDmemSize);
 	struct FunctionShaderBindings {
 		uint64_t code;
@@ -4187,7 +4188,7 @@ int Initialize() {
 	    0xbf800000, 0x85ea807e, 0x88ea106a, 0xbf870003,
 	    0xbefc03ff, 0x8a6ca000, 0xbf920009, 0xbefd210e,
 	};
-	const auto base = DriverDmemBase + AgcDmemOffset;
+	const auto base = mapped_base + AgcDmemOffset;
 	const auto function_table = base + 0x60;
 	const auto code_address = base + 0x100; // Shader code requires 256-byte alignment.
 	std::array<FunctionShaderBindings, 8> functions {};

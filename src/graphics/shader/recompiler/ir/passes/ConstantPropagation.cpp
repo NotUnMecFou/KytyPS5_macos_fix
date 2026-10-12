@@ -713,7 +713,11 @@ public:
 	explicit LaneMaskProjection(std::unordered_set<Inst*>& lowered_ancillary)
 	    : m_lowered_ancillary(lowered_ancillary) {}
 
-	void Fold(Inst& inst) {
+	void Fold(Inst& inst, bool uniform_masks_only = false) {
+		if (uniform_masks_only && IsCurrentLaneActivePredicate(inst)) {
+			Replace(inst, Value(true));
+			return;
+		}
 		if (inst.GetOpcode() != ValueOpcode::INotEqual32 || !Immediate(Arg(inst, 1), 0u)) return;
 		const auto* bit = Arg(inst, 0).TryInstruction();
 		if (bit == nullptr || bit->GetOpcode() != ValueOpcode::BitwiseAnd32 ||
@@ -725,6 +729,10 @@ public:
 		    !Immediate(Arg(*index, 1), 31u)) return;
 		const auto* lane = Arg(*index, 0).TryInstruction();
 		if (lane == nullptr || lane->GetOpcode() != ValueOpcode::LaneId) return;
+		// Uniform mask words have the same bit in both halves of wave64. Ballot
+		// projections still require wave32 because their low word omits lanes 32-63.
+		const auto mask = Arg(*shift, 0);
+		if (uniform_masks_only && !Immediate(mask, 0u) && !Immediate(mask, UINT32_MAX)) return;
 		m_visited.clear();
 		m_grounded = false;
 		if (CanProject(Arg(*shift, 0)) && m_grounded) Replace(inst, Project(Arg(*shift, 0)));
@@ -741,6 +749,93 @@ private:
 		const auto* source = Arg(inst, 0).TryInstruction();
 		return source != nullptr && source->GetOpcode() == ValueOpcode::Ballot
 		           ? Arg(*source, 0) : Value {};
+	}
+
+	static bool IsTrueBallotCount(Value value) {
+		const auto* sum = value.TryInstruction();
+		if (sum == nullptr || sum->GetOpcode() != ValueOpcode::IAdd32) return false;
+		const auto* low_count = Arg(*sum, 0).TryInstruction();
+		const auto* high_count = Arg(*sum, 1).TryInstruction();
+		if (low_count == nullptr || low_count->GetOpcode() != ValueOpcode::BitCount32 ||
+		    high_count == nullptr || high_count->GetOpcode() != ValueOpcode::BitCount32) {
+			return false;
+		}
+		const auto* low = Arg(*low_count, 0).TryInstruction();
+		const auto* high = Arg(*high_count, 0).TryInstruction();
+		if (low == nullptr || low->GetOpcode() != ValueOpcode::CompositeExtractU32x4 ||
+		    high == nullptr || high->GetOpcode() != ValueOpcode::CompositeExtractU32x4 ||
+		    !Immediate(Arg(*low, 1), 0u) || !Immediate(Arg(*high, 1), 1u) ||
+		    Arg(*low, 0) != Arg(*high, 0)) {
+			return false;
+		}
+		const auto* ballot = Arg(*low, 0).TryInstruction();
+		return ballot != nullptr && ballot->GetOpcode() == ValueOpcode::Ballot &&
+		       IsImmediate(Arg(*ballot, 0), Type::U1) && Arg(*ballot, 0).U1();
+	}
+
+	static bool IsActiveWaveMask(Value mask, Value lane) {
+		const auto* select = mask.TryInstruction();
+		if (select == nullptr || select->GetOpcode() != ValueOpcode::SelectU32) return false;
+		const auto* condition = Arg(*select, 0).TryInstruction();
+		if (condition == nullptr || condition->GetOpcode() != ValueOpcode::ULessThan32 ||
+		    Arg(*condition, 0) != lane || !Immediate(Arg(*condition, 1), 32u)) {
+			return false;
+		}
+		const auto* low = Arg(*select, 1).TryInstruction();
+		const auto* high = Arg(*select, 2).TryInstruction();
+		if (low == nullptr || low->GetOpcode() != ValueOpcode::CompositeExtractU64 ||
+		    high == nullptr || high->GetOpcode() != ValueOpcode::CompositeExtractU64 ||
+		    !Immediate(Arg(*low, 1), 0u) || !Immediate(Arg(*high, 1), 1u) ||
+		    Arg(*low, 0) != Arg(*high, 0)) {
+			return false;
+		}
+		const auto* shifted = Arg(*low, 0).TryInstruction();
+		if (shifted == nullptr || shifted->GetOpcode() != ValueOpcode::ShiftRightLogical64 ||
+		    !IsImmediate(Arg(*shifted, 0), Type::U64) || Arg(*shifted, 0).U64() != UINT64_MAX) {
+			return false;
+		}
+		const auto* negate = Arg(*shifted, 1).TryInstruction();
+		if (negate == nullptr || negate->GetOpcode() != ValueOpcode::ISub32 ||
+		    !Immediate(Arg(*negate, 0), 0u)) {
+			return false;
+		}
+		auto tagged_value = Arg(*negate, 1);
+		if (const auto* length = tagged_value.TryInstruction();
+		    length != nullptr && length->GetOpcode() == ValueOpcode::ShiftRightLogical32) {
+			if (!Immediate(Arg(*length, 1), 8u)) return false;
+			tagged_value = Arg(*length, 0);
+		}
+		const auto* tagged_count = tagged_value.TryInstruction();
+		if (tagged_count == nullptr || tagged_count->GetOpcode() != ValueOpcode::BitwiseOr32) {
+			return false;
+		}
+		const auto lhs = Arg(*tagged_count, 0);
+		const auto rhs = Arg(*tagged_count, 1);
+		const auto count = Immediate(lhs, 0x10000000u) ? rhs
+		                 : Immediate(rhs, 0x10000000u) ? lhs : Value {};
+		return !count.IsEmpty() && IsTrueBallotCount(count);
+	}
+
+	static bool IsCurrentLaneActivePredicate(const Inst& inst) {
+		if (inst.GetOpcode() != ValueOpcode::INotEqual32 || !Immediate(Arg(inst, 1), 0u)) {
+			return false;
+		}
+		const auto* bit = Arg(inst, 0).TryInstruction();
+		if (bit == nullptr || bit->GetOpcode() != ValueOpcode::BitwiseAnd32 ||
+		    !Immediate(Arg(*bit, 1), 1u)) {
+			return false;
+		}
+		const auto* shift = Arg(*bit, 0).TryInstruction();
+		if (shift == nullptr || shift->GetOpcode() != ValueOpcode::ShiftRightLogical32) return false;
+		const auto* index = Arg(*shift, 1).TryInstruction();
+		if (index == nullptr || index->GetOpcode() != ValueOpcode::BitwiseAnd32 ||
+		    !Immediate(Arg(*index, 1), 31u)) {
+			return false;
+		}
+		const auto lane = Arg(*index, 0);
+		const auto* lane_id = lane.TryInstruction();
+		return lane_id != nullptr && lane_id->GetOpcode() == ValueOpcode::LaneId &&
+		       IsActiveWaveMask(Arg(*shift, 0), lane);
 	}
 
 	bool CanProject(Value value) {
@@ -809,7 +904,16 @@ void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
 	LaneMaskProjection mask_projection(lowered_ancillary);
 	for (auto* block: blocks) {
 		for (auto inst = block->begin(); inst != block->end(); ++inst) {
-			if (wave_size == 32u) mask_projection.Fold(*inst);
+			if (wave_size == 32u) {
+				mask_projection.Fold(*inst);
+			}
+#if defined(__APPLE__)
+			// Metal has no subgroup builtins in vertex shaders, so drop LaneId uses that
+			// only read uniform wave64 masks.
+			else {
+				mask_projection.Fold(*inst, true);
+			}
+#endif
 			FoldInstruction(*block, inst, lowered_ancillary);
 		}
 	}
