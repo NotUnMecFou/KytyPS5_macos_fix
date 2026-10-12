@@ -12437,11 +12437,22 @@ void TestWave32MaskProjection() {
     const auto mixed_select = thread_bit(e, e.Select(selected, active_mask, raw));
     const auto different_lane = thread_bit(e, active_mask, false);
     const auto high_half = thread_bit(e, ballot(e, active, 1u));
+#if defined(__APPLE__)
+    const auto empty_mask = thread_bit(e, zero);
+    const auto full_mask = thread_bit(e, U32(Value(UINT32_MAX)));
+    const auto alternating_mask = thread_bit(e, U32(Value(0xaaaaaaaau)));
+#endif
     const auto initial_mask = e.BitwiseAnd(active_mask, ballot(e, selected));
     const auto raw_consumer = e.Emit(ValueOpcode::IAdd32, {initial_mask, Value(3u)});
     const auto initial_predicate = e.LogicalAnd(active, selected);
     const auto entry_size = entry->Instructions().size();
     ConstantPropagationPass({entry}, wave_size);
+#if defined(__APPLE__)
+    Check(empty_mask.Resolve() == Value(false) && full_mask.Resolve() == Value(true),
+          "uniform mask projection retained a lane dependency");
+    Check(!alternating_mask.Resolve().IsImmediate(),
+          "nonuniform mask projection lost its lane dependency");
+#endif
     Check(entry->Instructions().size() == entry_size,
           "rejected mixed mask graph left unused projected instructions");
     const auto combined_mask = e.BitwiseOr(active_mask, ballot(e, selected));
@@ -12509,6 +12520,51 @@ void TestWave32MaskProjection() {
     RemoveIdentities(program.blocks);
     ValidateProgram(program, true);
   }
+}
+
+void TestWaveActiveLaneProjection() {
+  using namespace ShaderRecompiler::IR;
+
+  Program program;
+  program.block_storage.push_back(std::make_unique<Block>());
+  program.blocks.push_back(program.block_storage.back().get());
+  auto *entry = program.blocks.front();
+  IREmitter ir(entry);
+  const auto ballot = ir.Emit(ValueOpcode::Ballot, {Value(true)});
+  const auto low = ir.CompositeExtract(ballot, 0u);
+  const auto high = ir.CompositeExtract(ballot, 1u);
+  const auto low_count = ir.Emit(ValueOpcode::BitCount32, {low});
+  const auto high_count = ir.Emit(ValueOpcode::BitCount32, {high});
+  const auto count = ir.Emit(ValueOpcode::IAdd32, {low_count, high_count});
+  const auto tagged_count = ir.Emit(ValueOpcode::BitwiseOr32,
+                                    {count, Value(0x10000000u)});
+  const auto negated = ir.Emit(ValueOpcode::ISub32,
+                               {Value(0u), tagged_count});
+  const auto full_mask = ir.Emit(ValueOpcode::ShiftRightLogical64,
+                                 {Value(UINT64_MAX), negated});
+  const auto low_mask = ir.Emit(ValueOpcode::CompositeExtractU64,
+                                {full_mask, Value(0u)});
+  const auto high_mask = ir.Emit(ValueOpcode::CompositeExtractU64,
+                                 {full_mask, Value(1u)});
+  const auto lane = ir.Emit(ValueOpcode::LaneId);
+  const auto low_half = ir.Emit(ValueOpcode::ULessThan32,
+                                {lane, Value(32u)});
+  const auto selected_mask = ir.Emit(ValueOpcode::SelectU32,
+                                     {low_half, low_mask, high_mask});
+  const auto lane_index = ir.Emit(ValueOpcode::BitwiseAnd32,
+                                  {lane, Value(31u)});
+  const auto lane_bit = ir.Emit(ValueOpcode::ShiftRightLogical32,
+                                {selected_mask, lane_index});
+  const auto predicate = ir.Emit(ValueOpcode::INotEqual32,
+                                 {ir.Emit(ValueOpcode::BitwiseAnd32,
+                                          {lane_bit, Value(1u)}),
+                                  Value(0u)});
+
+  ConstantPropagationPass(program.blocks, 64u);
+#if defined(__APPLE__)
+  Check(predicate.Resolve() == Value(true),
+        "active-lane projection retained unavailable vertex subgroup builtins");
+#endif
 }
 
 void TestU64ShiftConstantPropagation() {
@@ -15699,6 +15755,7 @@ int main() {
 #endif
   TestValuePhiValidation();
   TestWave32MaskProjection();
+  TestWaveActiveLaneProjection();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
