@@ -10176,6 +10176,30 @@ void TestVertexMadU64UsesPortableProduct() {
   }
 }
 
+void TestMadWithoutSlowNoContractionMark() {
+  const uint32_t shader[] = {
+      0xd5410004u, 0x20121301u, // v_mad_f32 v4, -v1, v9, s4
+      EncodeVop1(0x01, 0, 4 + 256), // v_mov_b32 v0, v4
+      EncodeExp0(0x0c, 0xf), EncodeExp1(0, 0, 0, 0), // position
+      EncodeSopp(0x01),
+  };
+  auto options = MakeCompileOptions(ShaderType::Vertex);
+  const auto marked = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(marked.spirv);
+  Check(DisassembleSpirvBinary(marked.spirv).find("NoContraction") != std::string::npos,
+        "legacy multiply-add lost NoContraction on the default host path");
+
+  options.no_contraction_is_slow = true;
+  const auto optimized = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(optimized.spirv);
+  const auto source = DisassembleSpirvBinary(optimized.spirv);
+  Check(source.find("NoContraction") == std::string::npos,
+        "MoltenVK multiply-add retained its slow NoContraction mark");
+  Check(source.find("OpFMul") != std::string::npos &&
+            source.find("OpFAdd") != std::string::npos && source.find(" Fma ") == std::string::npos,
+        "legacy multiply-add was contracted instead of preserving the rounded product");
+}
+
 void TestComputeDispatchWaveSize() {
   Check(Pm4::ComputeWaveSize(0x00000041u) == 64u,
         "dispatch without CS_W32_EN did not select wave64");
@@ -15730,6 +15754,7 @@ int main() {
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
   TestVertexMadU64UsesPortableProduct();
+  TestMadWithoutSlowNoContractionMark();
   TestComputeDispatchWaveSize();
   TestNewShaderRecompilerBufferLoadsGuardedByExec();
   TestNewShaderRecompilerBufferAtomicsGuardedByBounds();

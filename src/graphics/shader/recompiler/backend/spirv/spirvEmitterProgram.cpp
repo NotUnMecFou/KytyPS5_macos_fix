@@ -724,6 +724,17 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddFunction(spv::OpStore, state.pixel_valid_mask_variable,
 		                          ConstantU32(state, 1));
 	}
+	if (state.program.stage == ShaderType::Vertex &&
+	    state.program.info.subgroup_local_invocation_id &&
+	    state.subgroup_local_invocation_id_variable != 0) {
+		// This entry block runs with every vertex invocation active. Its exclusive scan is the
+		// subgroup lane even when an indexed draw's VertexIndex is sparse or reordered.
+		const auto lane = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformIAdd, TypeU32(state), lane,
+		                          ConstantU32(state, spv::ScopeSubgroup),
+		                          spv::GroupOperationExclusiveScan, ConstantU32(state, 1));
+		state.builder.AddFunction(spv::OpStore, state.subgroup_local_invocation_id_variable, lane);
+	}
 	if (state.lds_storage_class == spv::StorageClassStorageBuffer && state.lds_variable != 0) {
 		const auto group_x = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 0);
 		const auto group_y = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 1);

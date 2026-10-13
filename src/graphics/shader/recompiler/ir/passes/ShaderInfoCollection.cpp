@@ -88,25 +88,28 @@ void CollectVertexInputs(const ShaderVertexInputInfo* vertex, ShaderInfo& info,
 	}
 }
 
-void CollectPixelInputs(const ShaderPixelInputInfo* pixel, ShaderInfo& info,
-                        std::array<bool, 32>& per_vertex,
-                        const std::array<uint8_t, 32>& used_components) {
+void CollectPixelInputs(const ShaderPixelInputInfo* pixel, bool fragment_shader_barycentric,
+	                    ShaderInfo& info,
+	                    std::array<bool, 32>& per_vertex,
+	                    const std::array<uint8_t, 32>& used_components) {
 	if (pixel->HasPositionInput()) {
 		AddInput(info, StageInputKind::FragCoord, 0, 4, "gl_FragCoord");
 	}
 	if (pixel->ps_front_face) {
 		AddInput(info, StageInputKind::FrontFacing, 0, 1, "gl_FrontFacing");
 	}
-	// Mixed interpolation modes share raw vertices at their guest export slot.
-	// Rectangle expansion alone supplies separate flat and smooth outputs.
-	for (uint32_t input = 0; input < pixel->input_num; input++) {
-		for (uint32_t alias = 0; alias < pixel->input_num; alias++) {
-			const bool same_mode = ShaderPixelParameterIsFlat(*pixel, input) ==
-			                       ShaderPixelParameterIsFlat(*pixel, alias);
-			if (ShaderPixelParameterMappedLocation(*pixel, input) ==
-			        ShaderPixelParameterMappedLocation(*pixel, alias) &&
-			    (pixel->parameter_mode != ShaderPixelParameterMode::Rectangle || same_mode)) {
-				per_vertex[input] = per_vertex[input] || per_vertex[alias] || !same_mode;
+	if (fragment_shader_barycentric) {
+		// Mixed interpolation modes share raw vertices at their guest export slot.
+		// Rectangle expansion alone supplies separate flat and smooth outputs.
+		for (uint32_t input = 0; input < pixel->input_num; input++) {
+			for (uint32_t alias = 0; alias < pixel->input_num; alias++) {
+				const bool same_mode = ShaderPixelParameterIsFlat(*pixel, input) ==
+				                       ShaderPixelParameterIsFlat(*pixel, alias);
+				if (ShaderPixelParameterMappedLocation(*pixel, input) ==
+				        ShaderPixelParameterMappedLocation(*pixel, alias) &&
+				    (pixel->parameter_mode != ShaderPixelParameterMode::Rectangle || same_mode)) {
+					per_vertex[input] = per_vertex[input] || per_vertex[alias] || !same_mode;
+				}
 			}
 		}
 	}
@@ -114,7 +117,7 @@ void CollectPixelInputs(const ShaderPixelInputInfo* pixel, ShaderInfo& info,
 		AddInput(info, StageInputKind::Parameter, input, 4, fmt::format("in_param_{}", input),
 		         per_vertex[input]);
 	}
-	for (uint32_t input = 0; input < pixel->input_num; input++) {
+	for (uint32_t input = 0; fragment_shader_barycentric && input < pixel->input_num; input++) {
 		if (used_components[input] != 0 && per_vertex[input] &&
 		    !ShaderPixelParameterIsFlat(*pixel, input)) {
 			const auto kind = pixel->ps_no_perspective ? StageInputKind::BaryCoordNoPerspective
@@ -141,7 +144,7 @@ void CollectComputeInputs(const ShaderComputeInputInfo* compute, ShaderInfo& inf
 	}
 }
 
-void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
+void AddBuiltinInput(ShaderInfo& info, StageInputKind kind, bool fragment_shader_barycentric) {
 	switch (kind) {
 		case StageInputKind::VertexIndex:
 			AddInput(info, kind, 0, 1, "gl_VertexIndex");
@@ -167,10 +170,14 @@ void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
 			[[fallthrough]];
 		case StageInputKind::BaryCoordSmooth:
 		case StageInputKind::BaryCoordSmoothCentroid:
-			AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			if (fragment_shader_barycentric) {
+				AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			}
 			break;
 		case StageInputKind::BaryCoordNoPerspective:
-			AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			if (fragment_shader_barycentric) {
+				AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			}
 			break;
 		case StageInputKind::WorkgroupId:
 			AddInput(info, kind, 0, 3, "gl_WorkGroupID");
@@ -284,8 +291,8 @@ struct InputUsage {
 	}
 };
 
-void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs,
-           const Inst& inst) {
+void Visit(Program& program, ShaderStageInputInfo input_info, bool fragment_shader_barycentric,
+	       InputUsage& inputs, const Inst& inst) {
 	auto& info = program.info;
 	const auto op = inst.GetOpcode();
 	const auto buffer_access = BufferAccessOf(op);
@@ -410,8 +417,10 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 				return Fail("interpolation parameter reference is out of range");
 			}
 			const auto input = inst.Arg(0).U32();
-			inputs.per_vertex[input] |= inst.Arg(2).U32() < 2u ||
-			                            !ShaderPixelParameterIsFlat(*input_info.pixel, input);
+			if (fragment_shader_barycentric) {
+				inputs.per_vertex[input] |= inst.Arg(2).U32() < 2u ||
+				                            !ShaderPixelParameterIsFlat(*input_info.pixel, input);
+			}
 			break;
 		}
 		case ValueOpcode::GetBuiltin: {
@@ -551,7 +560,8 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 
 } // namespace
 
-void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
+void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info,
+	                   bool fragment_shader_barycentric) {
 	if (!program.resource_tracking_complete || program.shader_info_complete) {
 		return Fail(!program.resource_tracking_complete ? "shader resources were not tracked"
 		                                                : "shader info already collected");
@@ -574,7 +584,7 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	InputUsage inputs;
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
-			Visit(program, input_info, inputs, inst);
+			Visit(program, input_info, fragment_shader_barycentric, inputs, inst);
 		}
 	}
 	for (uint32_t index = 0; index < inputs.user_data.size(); index++) {
@@ -592,13 +602,14 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 		case ShaderType::TessellationEvaluation:
 		case ShaderType::Mesh: break;
 		case ShaderType::Pixel:
-			CollectPixelInputs(input_info.pixel, info, inputs.per_vertex, inputs.components);
+			CollectPixelInputs(input_info.pixel, fragment_shader_barycentric, info,
+			                   inputs.per_vertex, inputs.components);
 			break;
 		case ShaderType::Compute: CollectComputeInputs(input_info.compute, info); break;
 		default: return Fail("unsupported shader stage for info collection");
 	}
 	for (uint32_t i = 0; i < inputs.builtin_count; i++) {
-		AddBuiltinInput(info, inputs.builtins[i]);
+		AddBuiltinInput(info, inputs.builtins[i], fragment_shader_barycentric);
 	}
 	program.shader_info_complete = true;
 }

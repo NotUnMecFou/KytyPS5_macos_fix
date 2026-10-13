@@ -101,13 +101,30 @@ uint32_t EmitF32ToU32(EmitterState& state, uint32_t src, bool signed_value) {
 
 } // namespace
 
+namespace {
+
+void MarkNoContraction(EmitterState& state, uint32_t result) {
+	if (!state.no_contraction_is_slow) {
+		state.builder.AddAnnotation(spv::OpDecorate, result, spv::DecorationNoContraction);
+	}
+}
+
+} // namespace
+
 uint32_t EmitFPFma32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
 	const auto result = EmitGlsl<GLSLstd450Fma, IR::Type::F32>(state, a, b, c);
-	state.builder.AddAnnotation(spv::OpDecorate, result, spv::DecorationNoContraction);
+	// Fma is already one operation; without the mark there is no adjacent operation to fuse.
+	MarkNoContraction(state, result);
 	return result;
 }
 
 uint32_t EmitFPMad32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c) {
+	if (state.no_contraction_is_slow) {
+		// Flush the rounded product before the add. The bit operations prevent the Metal compiler
+		// from contracting the two operations without the expensive NoContraction decoration.
+		const auto product = EmitFPMul32(state, a, b);
+		return EmitFPAdd32(state, EmitFlushF32DenormToSignedZero(state, product), c);
+	}
 	// Explicit denormal checks typically drop 3DMiniGolf menu FPS from 28-29 to 21-24
 	// on NVIDIA RTX 5080 Laptop GPU, so leave them disabled for this experiment.
 	// a = EmitFlushF32DenormToSignedZero(state, a);

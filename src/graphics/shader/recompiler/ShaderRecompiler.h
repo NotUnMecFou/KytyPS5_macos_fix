@@ -22,6 +22,8 @@ struct CompileOptions {
 	bool                        dump_ir                    = true;
 	bool                        early_dump                 = false;
 	const char*                 dump_label                 = nullptr;
+	bool                        fragment_shader_barycentric = true;
+	bool                        no_contraction_is_slow      = false;
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;
 	ShaderStageInputInfo        input_info;

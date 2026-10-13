@@ -874,7 +874,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	IR::RemoveIdentities(ir.blocks);
 	IR::EliminateDeadCode(ir.blocks);
 
-	IR::CollectShaderInfo(ir, options.input_info);
+	IR::CollectShaderInfo(ir, options.input_info, options.fragment_shader_barycentric);
 	std::string ir_dump;
 	if (options.dump_ir) {
 		ir_dump = MakeIrDump(translated.cfg_dump, ir);
@@ -885,7 +885,8 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 
 	LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " SPIR-V EmitProgram\n",
 	     GetDumpLabel(options), StageName(ir.stage), ir.shader_hash);
-	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data_start_dword);
+	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data_start_dword,
+	                                options.no_contraction_is_slow);
 	LOGF("%s phase end: stage=%s hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
 	     " elapsed_ms=%" PRIu64 "\n",
 	     GetDumpLabel(options), StageName(ir.stage), ir.shader_hash,

@@ -571,7 +571,19 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.program.info.subgroup_local_invocation_id) {
+#if defined(__APPLE__)
+	// Metal has subgroup operations in vertex functions, but no subgroup lane-index builtin.
+	// Recover the lane with an exclusive scan of one in the function entry block.
+	const bool subgroup_builtin_allowed = state.program.stage != ShaderType::Vertex;
+	if (state.program.info.subgroup_local_invocation_id && !subgroup_builtin_allowed) {
+		state.subgroup_local_invocation_id_variable = state.builder.DefineGlobalVariable(
+		    TypePointer(state, spv::StorageClassPrivate, TypeU32(state)), spv::StorageClassPrivate);
+		state.builder.AddName(state.subgroup_local_invocation_id_variable, "lane_index");
+	}
+#else
+	const bool subgroup_builtin_allowed = true;
+#endif
+	if (state.program.info.subgroup_local_invocation_id && subgroup_builtin_allowed) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -769,6 +781,12 @@ void DefineModule(EmitterState& state) {
 	    state.program.info.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
+#if defined(__APPLE__)
+	if (state.program.stage == ShaderType::Vertex &&
+	    state.program.info.subgroup_local_invocation_id) {
+		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
+	}
+#endif
 	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}

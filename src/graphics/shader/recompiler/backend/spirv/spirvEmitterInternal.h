@@ -73,9 +73,11 @@ struct ImageDefinition {
 };
 
 struct EmitterState {
-	EmitterState(IR::Program& program_, ShaderStageInputInfo input_info_)
+	EmitterState(IR::Program& program_, ShaderStageInputInfo input_info_,
+	             bool no_contraction_is_slow_)
 	    : builder(program_.stage == ShaderType::Mesh ? 0x00010400u : 0x00010300u),
-	      program(program_), input_info(input_info_) {
+	      program(program_), input_info(input_info_),
+	      no_contraction_is_slow(no_contraction_is_slow_) {
 		if (ShaderWorkgroupInput(program.stage, input_info) != nullptr) {
 			lds_storage_class = spv::StorageClassWorkgroup;
 		}
@@ -88,6 +90,7 @@ struct EmitterState {
 	Builder                                          builder;
 	IR::Program&                                     program;
 	ShaderStageInputInfo                             input_info;
+	bool                                              no_contraction_is_slow = false;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;
 	uint32_t                                        u32_type = 0;
